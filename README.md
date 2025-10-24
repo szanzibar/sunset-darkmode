@@ -1,6 +1,6 @@
-# Sunset Dark Mode Automation
+# Sunset Dark Mode
 
-Automatically switches macOS between light and dark mode when crossing sunrise/sunset times.
+Automatically switches macOS between light and dark mode based on sunrise/sunset times.
 
 ## Installation
 
@@ -8,23 +8,20 @@ Automatically switches macOS between light and dark mode when crossing sunrise/s
 ./install.sh
 ```
 
-This installs dependencies (CoreLocationCLI, jq) and sets up a cron job.
+Installs dependencies and sets up automation to run every 5 minutes.
 
 ## How It Works
 
-- Runs every 5 minutes via cron (configurable in install.sh)
-- Checks location once per hour  
-- Fetches sunrise/sunset times when location changes or daily
-- **Only triggers** when crossing sunrise/sunset thresholds (doesn't enforce current state)
-- Retries location detection 3 times before giving up (It fails a lot)
-- Logs include human-readable address for debugging
+- Gets your location and fetches sunrise/sunset times
+- Switches to dark mode after sunset, light mode after sunrise
+- Forces dark/light mode after long script pause (For example on first boot or after sleeping)
+- Configurable offsets (default: sunrise +30min, sunset -30min)
+- Runs every 5 minutes, checks location hourly, fetches sunrise/sunset when location changes or daily.
+- All intervals are configurable in the script
 
-## Files
+## Note
 
-- `sunset-darkmode.sh` - Main script
-- `cache.json` - Stores location, address, and timing data
-- `sunset-darkmode.log` - Activity log with timestamps
-- `install.sh` / `uninstall.sh` - Setup/removal
+CoreLocationCLI can fail frequently. Make sure WiFi is enabled to avoid `kCLErrorDomain error 0`. See troubleshooting notes at https://github.com/fulldecent/corelocationcli
 
 ## Uninstall
 
