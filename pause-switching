@@ -1,0 +1,11 @@
+#!/bin/bash
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CACHE_FILE="$SCRIPT_DIR/cache.json"
+
+if [[ ! -f "$CACHE_FILE" ]]; then
+    echo "{}" > "$CACHE_FILE"
+fi
+
+jq '.override = true' "$CACHE_FILE" > "$CACHE_FILE.tmp" && mv "$CACHE_FILE.tmp" "$CACHE_FILE"
+echo "Paused automatic appearance switching until next sunrise/sunset"

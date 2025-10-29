@@ -66,6 +66,13 @@ set_appearance() {
     osascript -e "tell app \"System Events\" to tell appearance preferences to set dark mode to $1" 2>/dev/null
 }
 
+round_location() {
+    local lat=$(echo "$1" | cut -d' ' -f1)
+    local lng=$(echo "$1" | cut -d' ' -f2)
+    # Round to 3 decimal places (~110m precision)
+    printf "%.3f %.3f" "$lat" "$lng"
+}
+
 main() {
     command -v CoreLocationCLI >/dev/null || { log "CoreLocationCLI not found"; exit 1; }
     command -v jq >/dev/null || { log "jq not found"; exit 1; }
@@ -85,46 +92,54 @@ main() {
     local current_timestamp=$(date -j -f "%Y-%m-%d %H:%M:%S" "$current_time" +%s)
     local location_changed=false
     
-    # Check location if needed
-    if [[ -z "$last_location_check" ]] || 
-       (( current_timestamp - $(date -j -f "%Y-%m-%d %H:%M:%S" "$last_location_check" +%s 2>/dev/null || echo 0) > LOCATION_CHECK_INTERVAL )); then
-        if location_data=$(get_location); then
-            local current_location=$(echo "$location_data" | head -1)
-            local current_address=$(echo "$location_data" | tail -n +2 | tr '\n' ' ')
-            
-            if [[ "$current_location" != "$cached_location" ]]; then
-                location_changed=true
-                log "Location changed to $current_location ($current_address)"
-            fi
-            
-            cache_data=$(echo "$cache_data" | jq \
-                --arg time "$current_time" \
-                --arg loc "$current_location" \
-                --arg addr "$current_address" \
-                '.last_location_check = $time | .location = $loc | .address = $addr')
-            cached_location="$current_location"
-        fi
-    fi
+    # Check if switching is paused
+    local override_active=$(echo "$cache_data" | jq -r '.override // false')
     
-    # Fetch sunrise/sunset if needed
-    if [[ "$location_changed" == true ]] || [[ -z "$last_sunrise_fetch" ]] ||
-       (( current_timestamp - $(date -j -f "%Y-%m-%d %H:%M:%S" "$last_sunrise_fetch" +%s 2>/dev/null || echo 0) > SUNRISE_SUNSET_FETCH_INTERVAL )); then
-        if [[ -n "$cached_location" ]]; then
-            local lat=$(echo "$cached_location" | cut -d' ' -f1)
-            local lng=$(echo "$cached_location" | cut -d' ' -f2)
-            
-            if sunrise_sunset_data=$(fetch_sunrise_sunset "$lat" "$lng"); then
-                cached_sunrise=$(echo "$sunrise_sunset_data" | jq -r '.results.sunrise')
-                cached_sunset=$(echo "$sunrise_sunset_data" | jq -r '.results.sunset')
+    # Location and API checks (skip if paused)
+    if [[ "$override_active" != "true" ]]; then
+        # Check location if needed
+        if [[ -z "$last_location_check" ]] || 
+           (( current_timestamp - $(date -j -f "%Y-%m-%d %H:%M:%S" "$last_location_check" +%s 2>/dev/null || echo 0) > LOCATION_CHECK_INTERVAL )); then
+            if location_data=$(get_location); then
+                local current_location=$(round_location "$(echo "$location_data" | head -1)")
+                local current_address=$(echo "$location_data" | tail -n +2 | tr '\n' ' ')
                 
-                log "Updated sunrise/sunset: $cached_sunrise / $cached_sunset"
+                if [[ "$current_location" != "$cached_location" ]]; then
+                    location_changed=true
+                    log "Location changed to $current_location ($current_address)"
+                fi
+                
                 cache_data=$(echo "$cache_data" | jq \
                     --arg time "$current_time" \
-                    --arg sunrise "$cached_sunrise" \
-                    --arg sunset "$cached_sunset" \
-                    '.last_sunrise_sunset_fetch = $time | .sunrise = $sunrise | .sunset = $sunset')
+                    --arg loc "$current_location" \
+                    --arg addr "$current_address" \
+                    '.last_location_check = $time | .location = $loc | .address = $addr')
+                cached_location="$current_location"
             fi
         fi
+        
+        # Fetch sunrise/sunset if needed
+        if [[ "$location_changed" == true ]] || [[ -z "$last_sunrise_fetch" ]] ||
+           (( current_timestamp - $(date -j -f "%Y-%m-%d %H:%M:%S" "$last_sunrise_fetch" +%s 2>/dev/null || echo 0) > SUNRISE_SUNSET_FETCH_INTERVAL )); then
+            if [[ -n "$cached_location" ]]; then
+                local lat=$(echo "$cached_location" | cut -d' ' -f1)
+                local lng=$(echo "$cached_location" | cut -d' ' -f2)
+                
+                if sunrise_sunset_data=$(fetch_sunrise_sunset "$lat" "$lng"); then
+                    cached_sunrise=$(echo "$sunrise_sunset_data" | jq -r '.results.sunrise')
+                    cached_sunset=$(echo "$sunrise_sunset_data" | jq -r '.results.sunset')
+                    
+                    log "Updated sunrise/sunset: $cached_sunrise / $cached_sunset"
+                    cache_data=$(echo "$cache_data" | jq \
+                        --arg time "$current_time" \
+                        --arg sunrise "$cached_sunrise" \
+                        --arg sunset "$cached_sunset" \
+                        '.last_sunrise_sunset_fetch = $time | .sunrise = $sunrise | .sunset = $sunset')
+                fi
+            fi
+        fi
+    else
+        log "Switching paused - skipping location/API checks"
     fi
     
     # Check if we need to switch modes
@@ -138,30 +153,46 @@ main() {
         local should_switch=false
         local reason=""
         local dark_mode=false
+        local crossed_threshold=false
         
-        # Force mode if last check was over an hour ago or first time
-        if [[ -z "$last_check" ]] || 
-           (( current_timestamp - $(date -j -f "%Y-%m-%d %H:%M:%S" "$last_check" +%s 2>/dev/null || echo 0) > FORCE_MODE_THRESHOLD )); then
-            should_switch=true
-            if (( current_minutes > sunset_minutes || current_minutes < sunrise_minutes )); then
-                dark_mode=true
-                reason="force mode - setting dark (sunset: $adjusted_sunset)"
-            else
-                reason="force mode - setting light (sunrise: $adjusted_sunrise)"
-            fi
-        else
+        # Check for threshold crossing (always check, even when paused)
+        if [[ -n "$last_check" ]]; then
             local last_minutes=$(time_to_minutes "$last_check")
             if (( last_minutes < sunrise_minutes && current_minutes >= sunrise_minutes )); then
+                crossed_threshold=true
                 should_switch=true
                 reason="crossed sunrise - switching to light"
             elif (( last_minutes < sunset_minutes && current_minutes >= sunset_minutes )); then
+                crossed_threshold=true
                 should_switch=true
                 dark_mode=true
                 reason="crossed sunset - switching to dark"
             fi
         fi
         
-        if [[ "$should_switch" == true ]]; then
+        # If paused and crossed threshold, resume automatic switching
+        if [[ "$override_active" == "true" && "$crossed_threshold" == "true" ]]; then
+            log "Crossed sunrise/sunset threshold - resuming automatic switching"
+            cache_data=$(echo "$cache_data" | jq 'del(.override)')
+            override_active="false"
+        fi
+        
+        # Force mode logic (only if not paused and no threshold crossed)
+        if [[ "$override_active" != "true" && "$should_switch" != "true" ]]; then
+            if [[ -z "$last_check" ]] || 
+               (( current_timestamp - $(date -j -f "%Y-%m-%d %H:%M:%S" "$last_check" +%s 2>/dev/null || echo 0) > FORCE_MODE_THRESHOLD )); then
+                should_switch=true
+                if (( current_minutes > sunset_minutes || current_minutes < sunrise_minutes )); then
+                    dark_mode=true
+                    reason="force mode - setting dark (sunset: $adjusted_sunset)"
+                else
+                    reason="force mode - setting light (sunrise: $adjusted_sunrise)"
+                fi
+            fi
+        fi
+        
+        # Apply appearance change (only if not paused)
+        if [[ "$override_active" != "true" && "$should_switch" == "true" ]]; then
             log "$reason"
             set_appearance "$dark_mode"
         fi
